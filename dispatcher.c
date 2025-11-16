@@ -1,11 +1,10 @@
 /* dispatcher.c
-   Real Round-Robin dispatcher (quantum = 1s).
-   Usage: ./dispatcher jobs.csv
-   jobs.csv lines: arrival,id,service
-   Example:
-     0,1,5
-     2,2,3
-     4,3,2
+   Improved Round-Robin Dispatcher with:
+   ✔ Clean event logs
+   ✔ Job table at start
+   ✔ CORRECTED Gantt chart at end
+   ✔ Round Robin quantum = 1 sec
+   ✔ Proper job ID support (not just 0-9)
 */
 
 #include <stdio.h>
@@ -15,9 +14,9 @@
 #include <sys/wait.h>
 #include <string.h>
 #include <errno.h>
-#include <time.h>
 
 typedef enum { NOT_STARTED, RUNNING, SUSPENDED, TERMINATED } state_t;
+
 typedef struct job {
     int id;
     int arrival;
@@ -28,9 +27,18 @@ typedef struct job {
     struct job *next;
 } job_t;
 
-/* Simple queue implementation for RR */
+/* RR Queue */
 static job_t *rr_head = NULL, *rr_tail = NULL;
-static job_t *input_head = NULL; // sorted by arrival ascending
+
+/* Input Queue */
+static job_t *input_head = NULL;
+
+/* Gantt Chart - Changed to int array to store full job IDs */
+#define MAX_TIME 2000
+int gantt[MAX_TIME];
+int gantt_index = 0;
+
+/* ---------------- QUEUE FUNCTIONS ---------------- */
 
 void enqueue_rr(job_t *j) {
     j->next = NULL;
@@ -47,7 +55,6 @@ job_t *dequeue_rr() {
     return j;
 }
 
-/* helper: pop input if arrival <= t (input list sorted ascending) */
 job_t *pop_input_if_arrival_le(int t) {
     if (!input_head) return NULL;
     if (input_head->arrival <= t) {
@@ -63,186 +70,189 @@ int any_jobs_left() {
     return (input_head != NULL) || (rr_head != NULL);
 }
 
-/* Parse job list file. Expect CSV: arrival,id,service */
+/* ---------------- PRINT JOB TABLE ---------------- */
+
+void print_job_table() {
+    printf("\n==================== JOB TABLE ====================\n");
+    printf(" Job ID | Arrival | CPU Burst \n");
+    printf("--------+---------+-----------\n");
+
+    job_t *p = input_head;
+    while (p) {
+        printf("   %-4d |   %-5d |    %-5d\n",
+               p->id, p->arrival, p->total_cpu);
+        p = p->next;
+    }
+    printf("===================================================\n\n");
+}
+
+/* ---------------- CSV LOADING ---------------- */
+
 void load_jobs(const char *fname) {
     FILE *f = fopen(fname, "r");
     if (!f) { perror("fopen"); exit(1); }
+
     char line[256];
     job_t *last = NULL;
+
     while (fgets(line, sizeof(line), f)) {
         if (line[0]=='#' || strlen(line)<3) continue;
-        int arrival = 0, id = 0, service = 0;
-        // tolerant parsing: allow spaces and optional commas
-        if (sscanf(line, "%d,%d,%d", &arrival, &id, &service) < 3) continue;
+
+        int arrival, id, service;
+        if (sscanf(line, "%d,%d,%d", &arrival, &id, &service) < 3)
+            continue;
+
         job_t *j = calloc(1, sizeof(job_t));
-        if (!j) { perror("calloc"); exit(1); }
         j->id = id;
         j->arrival = arrival;
         j->total_cpu = service;
         j->remaining = service;
-        j->pid = 0; j->state = NOT_STARTED; j->next = NULL;
+        j->pid = -1;
+        j->state = NOT_STARTED;
+        j->next = NULL;
+
         if (!input_head) input_head = last = j;
         else { last->next = j; last = j; }
     }
     fclose(f);
 }
 
-/* reap any finished children (non-blocking). Returns number reaped. */
-int reap_children_nonblock() {
-    int reaped = 0;
-    int status;
-    pid_t r;
-    while ((r = waitpid(-1, &status, WNOHANG)) > 0) {
-        reaped++;
-        // find the job with this pid and mark terminated
-        job_t *it = NULL;
-        // search rr queue and input queue (unlikely in input). Also check current pointer in main.
-        // For simplicity, just print here; main loop also calls waitpid for current child when needed.
-        if (WIFEXITED(status) || WIFSIGNALED(status)) {
-            printf("[reap] child pid=%d exited (status=%d)\n", r, status);
-        }
-    }
-    return reaped;
-}
+/* ---------------- CHILD EXIT CHECK ---------------- */
 
-/* Check if a specific child pid has exited (non-blocking). Returns 1 if exited. */
 int child_exited(pid_t pid) {
     if (pid <= 0) return 0;
     int status;
     pid_t r = waitpid(pid, &status, WNOHANG);
-    if (r == 0) return 0; // still running
-    if (r == -1) {
-        // error (ECHILD if no such child)
-        return 1;
-    }
-    // r == pid
-    if (WIFEXITED(status) || WIFSIGNALED(status)) return 1;
-    return 0;
+    if (r == 0) return 0;
+    return 1;
 }
 
-int main(int argc, char **argv) {
-    if (argc < 2) { fprintf(stderr, "Usage: %s jobs.csv\n", argv[0]); exit(1); }
-    load_jobs(argv[1]);
-    int dispatcher_timer = 0;
-    job_t *current = NULL;
+/* ---------------- GANTT CHART ---------------- */
 
-    /* Main dispatcher loop */
-    while ( any_jobs_left() || current != NULL ) {
-        /* 1. move arrivals to RR queue */
-        job_t *m;
-        while ((m = pop_input_if_arrival_le(dispatcher_timer)) != NULL) {
-            enqueue_rr(m);
-            printf("[t=%d] Job %d arrived (cpu=%d)\n", dispatcher_timer, m->id, m->remaining);
-        }
-
-        /* reap any unexpectedly finished children (rare) */
-        reap_children_nonblock();
-
-        /* 2. If current running, decrement remaining and handle */
-        if (current) {
-            /* if child already exited (race or finished earlier), handle */
-            if (child_exited(current->pid)) {
-                printf("[t=%d] Job %d finished (child exited)\n", dispatcher_timer, current->id);
-                current->state = TERMINATED;
-                current = NULL;
-            } else {
-                /* Let it run for this quantum (we assume it is already running) */
-                printf("[t=%d] Running Job %d (pid=%d rem=%d)\n", dispatcher_timer, current->id, (int)current->pid, current->remaining);
-                current->remaining -= 1;
-
-                if (current->remaining <= 0) {
-                    /* job completed: tell child to terminate and wait for it */
-                    if (kill(current->pid, SIGINT) == -1) {
-                        if (errno != ESRCH) perror("kill(SIGINT)");
-                    } else {
-                        // give it a small moment to die cleanly
-                    }
-                    int st;
-                    waitpid(current->pid, &st, 0);
-                    printf("[t=%d] Job %d terminated by dispatcher (completed)\n", dispatcher_timer, current->id);
-                    current->state = TERMINATED;
-                    current = NULL;
-                } else {
-                    /* If there are other waiting jobs, preempt current */
-                    if (rr_head != NULL) {
-                        if (kill(current->pid, SIGTSTP) == -1) {
-                            if (errno != ESRCH) perror("kill(SIGTSTP)");
-                        } else {
-                            current->state = SUSPENDED;
-                            enqueue_rr(current);
-                            printf("[t=%d] Job %d suspended and requeued (rem=%d)\n", dispatcher_timer, current->id, current->remaining);
-                            current = NULL;
-                        }
-                    } else {
-                        /* no other jobs waiting: let it continue next tick */
-                        printf("[t=%d] Job %d continues (no other waiting) rem=%d\n", dispatcher_timer, current->id, current->remaining);
-                    }
-                }
-            }
-        }
-
-        /* 3. If nothing running and rr queue not empty -> start/resume */
-        if (!current && rr_head != NULL) {
-            job_t *job = dequeue_rr();
-            if (!job) {
-                // nothing to do
-            } else if (job->state == NOT_STARTED) {
-                /* start new process: fork + exec the job program (jobprog) */
-                pid_t pid = fork();
-                if (pid < 0) {
-                    perror("fork");
-                    // put job back
-                    enqueue_rr(job);
-                } else if (pid == 0) {
-                    /* Child: execute the worker program.
-                       Arguments: service_time (integer)
-                       We use execl with argv[1] = service_time string.
-                    */
-                    char arg1[32];
-                    sprintf(arg1, "%d", job->total_cpu);
-                    /* Replace the child with jobprog executable */
-                    execl("./jobprog", "./jobprog", arg1, (char*)NULL);
-                    /* If execl fails */
-                    perror("execl");
-                    _exit(1);
-                } else {
-                    /* Parent: record pid and consider current */
-                    job->pid = pid;
-                    job->state = RUNNING;
-                    current = job;
-                    printf("[t=%d] Started Job %d pid=%d\n", dispatcher_timer, job->id, (int)pid);
-                    /* Small sleep to reduce race where parent sends signal too early */
-                    usleep(100000); // 100ms
-                }
-            } else if (job->state == SUSPENDED) {
-                if (kill(job->pid, SIGCONT) == -1) {
-                    if (errno == ESRCH) {
-                        // child may have exited meanwhile; mark terminated
-                        job->state = TERMINATED;
-                        printf("[t=%d] Job %d missing on resume (already exited)\n", dispatcher_timer, job->id);
-                        free(job);
-                        job = NULL;
-                    } else {
-                        perror("kill(SIGCONT)");
-                        enqueue_rr(job);
-                    }
-                } else {
-                    job->state = RUNNING;
-                    current = job;
-                    printf("[t=%d] Resumed Job %d pid=%d\n", dispatcher_timer, job->id, (int)job->pid);
-                    /* allow child to get scheduled */
-                    usleep(50000);
-                }
-            } else {
-                // shouldn't happen
-            }
-        }
-
-        /* 4. Sleep for one second (quantum) */
-        sleep(1);
-        dispatcher_timer += 1;
+void print_gantt_chart() {
+    printf("\n==================== GANTT CHART ====================\n");
+    printf("Time:  ");
+    for (int i = 0; i < gantt_index; i++) {
+        printf("%-4d", i);
     }
 
-    printf("Dispatcher done (all jobs completed)\n");
+    printf("\nCPU:   ");
+    for (int i = 0; i < gantt_index; i++) {
+        if (gantt[i] == -1) {
+            printf(" -  ");
+        } else {
+            printf("J%-2d ", gantt[i]);
+        }
+    }
+
+    printf("\n=====================================================\n\n");
+}
+
+/* ---------------- MAIN DISPATCHER ---------------- */
+
+int main(int argc, char **argv) {
+    if (argc < 2) {
+        printf("Usage: %s jobs.csv\n", argv[0]);
+        exit(1);
+    }
+
+    load_jobs(argv[1]);
+    print_job_table();
+
+    /* Initialize Gantt chart with -1 (idle) */
+    for (int i = 0; i < MAX_TIME; i++) {
+        gantt[i] = -1;
+    }
+
+    int t = 0;
+    job_t *current = NULL;
+
+    while (any_jobs_left() || current != NULL) {
+
+        /* STEP 1: ARRIVALS - Move jobs from input queue to RR queue */
+        job_t *m;
+        while ((m = pop_input_if_arrival_le(t)) != NULL) {
+            printf("[t=%d] ➤ Job %d ARRIVED (burst=%d)\n",
+                   t, m->id, m->total_cpu);
+            enqueue_rr(m);
+        }
+
+        /* STEP 2: START or RESUME a job if nothing is currently running */
+        if (!current && rr_head != NULL) {
+            job_t *job = dequeue_rr();
+
+            if (job->state == NOT_STARTED) {
+                pid_t pid = fork();
+                if (pid == 0) {
+                    char arg[20];
+                    sprintf(arg, "%d", job->total_cpu);
+                    execl("./jobprog", "./jobprog", arg, NULL);
+                    perror("execl");
+                    exit(1);
+                }
+                job->pid = pid;
+                job->state = RUNNING;
+                current = job;
+                printf("[t=%d] ▶ START Job %d (pid=%d)\n", t, job->id, pid);
+                usleep(100000);
+
+            } else if (job->state == SUSPENDED) {
+                kill(job->pid, SIGCONT);
+                job->state = RUNNING;
+                current = job;
+                printf("[t=%d] ▶ RESUME Job %d (pid=%d)\n", t, job->id, job->pid);
+                usleep(50000);
+            }
+        }
+
+        /* STEP 3: GANTT UPDATE - Record what will run during this quantum
+           CRITICAL: This must happen BEFORE the job runs, not after! */
+        if (current)
+            gantt[gantt_index] = current->id;
+        else
+            gantt[gantt_index] = -1;
+        gantt_index++;
+
+        /* STEP 4: RUN the current job for 1 quantum */
+        if (current) {
+            /* Let the job run for 1 second (the quantum) */
+            sleep(1);
+            
+            /* After running, check if child exited naturally during execution */
+            if (child_exited(current->pid)) {
+                printf("[t=%d] ✔ FINISH Job %d (exited naturally)\n", t, current->id);
+                current = NULL;
+            } else {
+                printf("[t=%d] ⚙ RAN Job %d (remaining: %d → %d)\n",
+                       t, current->id, current->remaining, current->remaining - 1);
+                current->remaining--;
+
+                /* Check if it's done or needs preemption */
+                if (current->remaining <= 0) {
+                    kill(current->pid, SIGINT);
+                    waitpid(current->pid, NULL, 0);
+                    printf("[t=%d] ✔ FINISH Job %d (completed)\n", t, current->id);
+                    current = NULL;
+                } else if (rr_head != NULL) {
+                    /* Quantum expired and other jobs waiting - preempt */
+                    kill(current->pid, SIGTSTP);
+                    current->state = SUSPENDED;
+                    enqueue_rr(current);
+                    printf("[t=%d] ⏸ PREEMPT Job %d → suspended\n", t, current->id);
+                    current = NULL;
+                }
+                /* else: no other jobs waiting, let it continue next quantum */
+            }
+        } else {
+            /* No job running - idle time */
+            sleep(1);
+        }
+
+        t++;
+    }
+
+    printf("\nDispatcher done (all jobs completed)\n");
+    print_gantt_chart();
+
     return 0;
 }
