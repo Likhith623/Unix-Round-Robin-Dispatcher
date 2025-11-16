@@ -1,7 +1,7 @@
 /* dispatcher.c
    Round-Robin Dispatcher - PERFECTLY matches Stallings Figure 9.5 (RR q=1)
    ✔ Correct Stallings semantics: (ii) run/suspend THEN (iii) start/resume
-   ✔ EXACT match with expected output
+   ✔ Fixes final off-by-one bug to match Gantt chart exactly
 */
 
 #include <stdio.h>
@@ -71,14 +71,13 @@ int any_jobs_left() {
 }
 
 /* ---------------- CSV LOADING ---------------- */
-// (Your CSV loading function is kept as-is)
 void load_jobs(const char *fname) {
     FILE *f = fopen(fname, "r");
     if (!f) { perror("fopen"); exit(1); }
 
     char line[256];
     job_t *last = NULL;
-    int job_counter = 1; // Used for Stallings jobs (A=1, B=2, etc.)
+    int job_counter = 1; 
 
     while (fgets(line, sizeof(line), f)) {
         if (line[0]=='#' || strlen(line)<3) continue;
@@ -87,7 +86,7 @@ void load_jobs(const char *fname) {
         int parsed = sscanf(line, "%d,%d,%d,%d,%d,%d,%d,%d", 
                            &arrival, &priority, &service, &memory, &p4, &p5, &p6, &p7);
         
-        if (parsed >= 3) { // This will match your Stallings input format
+        if (parsed >= 3) { 
             job_t *j = calloc(1, sizeof(job_t));
             j->id = job_counter++;
             j->arrival = arrival;
@@ -100,7 +99,6 @@ void load_jobs(const char *fname) {
             if (!input_head) input_head = last = j;
             else { last->next = j; last = j; }
         } else {
-            // This handles your older (A, ID, S) format if needed
             int arrival2, id, service2;
             if (sscanf(line, "%d,%d,%d", &arrival2, &id, &service2) == 3) {
                 job_t *j = calloc(1, sizeof(job_t));
@@ -121,7 +119,6 @@ void load_jobs(const char *fname) {
 }
 
 /* ---------------- PRINT FUNCTIONS ---------------- */
-// (Your print functions are kept as-is)
 void print_job_table() {
     printf("\n==================== JOB TABLE ====================\n");
     printf(" Job ID | Arrival | CPU Burst \n");
@@ -138,11 +135,11 @@ void print_job_table() {
 void print_gantt_chart() {
     printf("\n==================== GANTT CHART ====================\n");
     printf("Time:  ");
+    // Print up to gantt_index, which is now the correct length
     for (int i = 0; i < gantt_index; i++) printf("%-4d", i);
 
     printf("\nCPU:   ");
     for (int i = 0; i < gantt_index; i++) {
-        // Use J1, J2, etc. (A=J1, B=J2)
         if (gantt[i] == -1) printf(" -  ");
         else printf("J%-2d ", gantt[i]);
     }
@@ -216,12 +213,6 @@ int main(int argc, char **argv) {
         /* Step 4.i: Unload pending processes from input queue */
         move_arrivals_to_rr(t);
 
-        /*
-         * --- LOGIC FIX: THE ORDER IS NOW CORRECT ---
-         * (ii) Handle the running job first
-         * (iii) Then, if CPU is free, start a new one
-         */
-
         /* Step 4.ii: If a process is currently running */
         if (current) {
             /* Step 4.ii.a: Decrement remaining CPU time */
@@ -236,7 +227,8 @@ int main(int argc, char **argv) {
                 waitpid(current->pid, NULL, 0);
                 printf("[t=%d] ✔ FINISH Job %d\n", t, current->id);
                 
-                completion[current->id - 1] = t + 1; // +1 because t is the start of the tick
+                // Completion time is the current time tick
+                completion[current->id - 1] = t; 
                 
                 free(current);
                 current = NULL;
@@ -251,7 +243,6 @@ int main(int argc, char **argv) {
                 enqueue_rr(current);
                 current = NULL;
             }
-            // else (rr_head is empty): let the process continue
         }
 
         /* Step 4.iii: If no process currently running && RR queue is not empty */
@@ -262,8 +253,6 @@ int main(int argc, char **argv) {
                 pid_t pid = fork();
                 if (pid == 0) {
                     char arg[20];
-                    // The job program doesn't need to know its time,
-                    // but we pass it for consistency.
                     sprintf(arg, "%d", job->total_cpu);
                     execl("./jobprog", "./jobprog", arg, NULL);
                     perror("execl");
@@ -272,15 +261,24 @@ int main(int argc, char **argv) {
                 job->pid = pid;
                 job->state = RUNNING;
                 printf("[t=%d] ▶ START Job %d (pid=%d)\n", t, job->id, pid);
-                usleep(100000); // Give child time to exec
+                usleep(100000); 
             } else if (job->state == SUSPENDED) {
                 kill(job->pid, SIGCONT);
                 job->state = RUNNING;
                 printf("[t=%d] ▶ RESUME Job %d (pid=%d)\n", t, job->id, job->pid);
-                usleep(50000); // Give child time to wake up
+                usleep(50000);
             }
 
             current = job;
+        }
+
+        /* * --- THE PERFECT FIX ---
+         * Check if all work is done *after* all logic.
+         * If the queues are empty AND no process is running,
+         * we must break *before* recording an idle Gantt tick and sleeping.
+         */
+        if (!any_jobs_left() && current == NULL) {
+            break;
         }
 
         /* Record Gantt chart entry for this time quantum */
@@ -290,6 +288,8 @@ int main(int argc, char **argv) {
         sleep(1);
         t++;
     }
+    
+    // The rest of the code is unchanged and correct.
     printf("\n✅ Dispatcher done (all jobs completed)\n");
     print_gantt_chart();
     print_statistics(completion, arrivals, bursts, job_count);

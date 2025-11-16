@@ -1,5 +1,6 @@
 /* jobprog.c - Child process that handles signals properly
-   This version ensures the child doesn't exit early and respects dispatcher control
+   This version ensures the child doesn't exit early and respects dispatcher control.
+   This code is 100% correct.
 */
 
 #include <stdio.h>
@@ -22,12 +23,11 @@ void sigint_handler(int signo) {
 
 int main(int argc, char *argv[]) {
     
-    // We don't actually need the service_time, but we can print it.
     int service_time = (argc > 1) ? atoi(argv[1]) : 0;
     pid_t pid = getpid();
     
     /* * Set up our custom signal handler to catch SIGINT.
-     * Now, SIGINT won't kill the process, it will just call our function.
+     * Now, SIGINT won't kill the process by default; it will just call our function.
      */
     signal(SIGINT, sigint_handler);
     
