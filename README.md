@@ -3,11 +3,12 @@
 How to run?
 
 1. Copy and paste these commands in the terminal:
-
+'''
 gcc -o dispatcher dispatcher.c
 gcc -o jobprog jobprog.c
 
 
 
-2. Then, paste this: 
- ./dispatcher jobs.csv
+3. Then, paste this:
+'''
+./dispatcher jobs.csv
