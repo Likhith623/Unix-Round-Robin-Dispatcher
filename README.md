@@ -6,9 +6,10 @@ How to run?
 ```
 gcc -o dispatcher dispatcher.c
 gcc -o jobprog jobprog.c
-
+```
 
 
 3. Then, paste this:
 ```
 ./dispatcher jobs.csv
+```
