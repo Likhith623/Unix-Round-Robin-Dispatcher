@@ -7,37 +7,52 @@
 #include <unistd.h>
 #include <signal.h>
 
+/* * We use a global flag to know when to terminate.
+ * 'volatile sig_atomic_t' ensures it's safe to change in a signal handler.
+ */
 volatile sig_atomic_t keep_running = 1;
 
+/* * This is our custom signal handler for SIGINT.
+ * When the dispatcher sends SIGINT, this function runs.
+ */
 void sigint_handler(int signo) {
     /* SIGINT = terminate */
     keep_running = 0;
 }
 
 int main(int argc, char *argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <service_time>\n", argv[0]);
-        exit(1);
-    }
     
-    int service_time = atoi(argv[1]);
+    // We don't actually need the service_time, but we can print it.
+    int service_time = (argc > 1) ? atoi(argv[1]) : 0;
     pid_t pid = getpid();
     
-    /* Set up signal handler for SIGINT */
+    /* * Set up our custom signal handler to catch SIGINT.
+     * Now, SIGINT won't kill the process, it will just call our function.
+     */
     signal(SIGINT, sigint_handler);
     
-    /* SIGTSTP and SIGCONT use default handlers (stop and continue) */
+    /* * We do NOT need to handle SIGTSTP (stop) or SIGCONT (continue).
+     * The default OS behavior for these signals is exactly what we want
+     * (pause the process and resume the process).
+     */
     
     printf("[job pid=%d] started, service_time=%d\n", pid, service_time);
-    fflush(stdout);
+    fflush(stdout); // Flush output buffer so parent sees it
     
-    /* Run indefinitely until dispatcher sends SIGINT
-       The dispatcher tracks remaining time, not us */
+    /* * This is the main "work" loop.
+     * It runs forever (as long as keep_running is 1).
+     * The dispatcher tracks the *actual* remaining time.
+     * This child just runs until it's told to stop.
+     * sleep(1) is interruptible by signals.
+     */
     while (keep_running) {
-        sleep(1);  /* Sleep in small chunks so signals can interrupt */
+        sleep(1);
     }
     
-    printf("[job pid=%d] terminating\n", pid);
+    /* * The loop only exits when sigint_handler sets keep_running = 0.
+     * Now we can exit gracefully.
+     */
+    printf("[job pid=%d] terminating (SIGINT received)\n", pid);
     fflush(stdout);
     
     return 0;
