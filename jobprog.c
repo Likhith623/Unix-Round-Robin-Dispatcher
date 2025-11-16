@@ -1,10 +1,5 @@
-/* jobprog.c
-   Simple job program: runs for service_time seconds.
-   Usage: ./jobprog <service_time>
-   It relies on default signal behavior:
-     SIGTSTP - stop (suspend)
-     SIGCONT - continue (resume)
-     SIGINT  - terminate
+/* jobprog.c - Child process that handles signals properly
+   This version ensures the child doesn't exit early and respects dispatcher control
 */
 
 #include <stdio.h>
@@ -12,36 +7,38 @@
 #include <unistd.h>
 #include <signal.h>
 
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        fprintf(stderr, "Usage: %s <service_time>\n", argv[0]);
-        return 1;
-    }
-    int service_time = atoi(argv[1]);
-    if (service_time <= 0) return 0;
+volatile sig_atomic_t keep_running = 1;
 
-    /* Optionally print a startup message (comment out for "clean" runs) */
-    printf("[job pid=%d] started, service_time=%d\n", getpid(), service_time);
-    fflush(stdout);
-
-    /* Run service_time seconds. We use sleep(1) each loop so a SIGTSTP can stop it. */
-    for (int i = 0; i < service_time; ++i) {
-        /* Simulate 1 second of CPU-bound work:
-           If you want busy CPU instead of sleeping, replace sleep(1) with a busy loop.
-           For the assignment, sleep(1) is fine and easier to control.
-        */
-        sleep(1);
-        /* Optionally print progress (comment for quieter output) */
-        /* printf("[job pid=%d] progress %d/%d\n", getpid(), i+1, service_time); fflush(stdout); */
-    }
-
-    /* Completed normally */
-    printf("[job pid=%d] finished normally\n", getpid());
-    fflush(stdout);
-    return 0;
+void sigint_handler(int signo) {
+    /* SIGINT = terminate */
+    keep_running = 0;
 }
 
-
-
-
-
+int main(int argc, char *argv[]) {
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <service_time>\n", argv[0]);
+        exit(1);
+    }
+    
+    int service_time = atoi(argv[1]);
+    pid_t pid = getpid();
+    
+    /* Set up signal handler for SIGINT */
+    signal(SIGINT, sigint_handler);
+    
+    /* SIGTSTP and SIGCONT use default handlers (stop and continue) */
+    
+    printf("[job pid=%d] started, service_time=%d\n", pid, service_time);
+    fflush(stdout);
+    
+    /* Run indefinitely until dispatcher sends SIGINT
+       The dispatcher tracks remaining time, not us */
+    while (keep_running) {
+        sleep(1);  /* Sleep in small chunks so signals can interrupt */
+    }
+    
+    printf("[job pid=%d] terminating\n", pid);
+    fflush(stdout);
+    
+    return 0;
+}
